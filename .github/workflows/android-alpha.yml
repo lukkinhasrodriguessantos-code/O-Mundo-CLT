@@ -43,6 +43,10 @@ jobs:
         run: |
           set -euo pipefail
 
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3
+          rm -rf /var/lib/apt/lists/*
+
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           mkdir -p "$HOME/.local/share/godot/export_templates"
           mkdir -p "$HOME/.config/godot"
