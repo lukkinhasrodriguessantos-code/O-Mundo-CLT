@@ -33,7 +33,7 @@ jobs:
 
     steps:
       - name: Baixar a branch main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: main
           fetch-depth: 0
@@ -44,7 +44,7 @@ jobs:
           set -euo pipefail
 
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 zip libfontconfig1
           rm -rf /var/lib/apt/lists/*
 
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -89,6 +89,49 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
           echo "Projeto encontrado em: $PROJECT_DIR"
 
+      - name: Aplicar compatibilidade Godot 4.7 e sincronizar o pacote
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/main.gd")
+          text = path.read_text(encoding="utf-8")
+          replacements = {
+              "var screen_size:=mobile_ui_manager.canvas_size()": "var screen_size:Vector2=mobile_ui_manager.canvas_size()",
+              "var code:=input.text.strip_edges().to_upper()": "var code:String=input.text.strip_edges().to_upper()",
+              'var session_state:="N/D" if alpha_session_manager==null else alpha_session_manager.session_summary()': 'var session_state:String="N/D" if alpha_session_manager==null else str(alpha_session_manager.session_summary())',
+              "var launches:=0 if alpha_session_manager==null else alpha_session_manager.launch_count": "var launches:int=0 if alpha_session_manager==null else int(alpha_session_manager.launch_count)",
+              "var scale := mobile_ui_manager.get_touch_scale()": "var scale:float=float(mobile_ui_manager.get_touch_scale())",
+              "var base_size := Vector2(168,168) * scale": "var base_size:Vector2=Vector2(168,168) * scale",
+              "var local_center := base_size * 0.5": "var local_center:Vector2=base_size * 0.5",
+              "var knob_size := Vector2(64,64) * scale": "var knob_size:Vector2=Vector2(64,64) * scale",
+              'var hud_day := "SEGUNDA-FEIRA" if tutorial_manager.is_active() else workday_manager.get_day_label()': 'var hud_day:String="SEGUNDA-FEIRA" if tutorial_manager.is_active() else str(workday_manager.get_day_label())',
+              "var week_to_show:=workday_manager.current_week": "var week_to_show:int=int(workday_manager.current_week)",
+              "var transition:=life_cycle_manager.sleep_and_advance(workday_manager.get_day_label(),workday_manager.current_week)": "var transition:String=str(life_cycle_manager.sleep_and_advance(workday_manager.get_day_label(),workday_manager.current_week))",
+              "var day_name:=workday_manager.get_day_label()": "var day_name:String=str(workday_manager.get_day_label())",
+              "var mentor:=tutorial_manager.get_mentor_name(area)": "var mentor:String=str(tutorial_manager.get_mentor_name(area))",
+          }
+
+          changed = 0
+          for before, after in replacements.items():
+              if before in text:
+                  changed += text.count(before)
+                  text = text.replace(before, after)
+              elif after not in text:
+                  raise SystemExit(f"Trecho esperado não encontrado em main.gd: {before}")
+
+          path.write_text(text, encoding="utf-8")
+          print(f"Compatibilidade Godot 4.7 aplicada em {changed} ocorrência(s).")
+          PY
+
+          mkdir -p .github/workflows
+          cp "$GITHUB_WORKSPACE/.github/workflows/android-alpha.yml" .github/workflows/android-alpha.yml
+          python3 tools/make_build_manifest.py
+
       - name: Validar arquivos, cenas e scripts
         shell: bash
         run: |
@@ -132,6 +175,18 @@ jobs:
           cp "build/android/$APK_NAME" "$GITHUB_WORKSPACE/$APK_PATH"
           ls -lh "$GITHUB_WORKSPACE/$APK_PATH"
 
+      - name: Atualizar o ZIP final sincronizado
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          rm -f "$GITHUB_WORKSPACE/${SOURCE_ZIP}.new"
+          zip -qr "$GITHUB_WORKSPACE/${SOURCE_ZIP}.new" . -x '.godot/*' 'build/*' '__pycache__/*'
+          mv "$GITHUB_WORKSPACE/${SOURCE_ZIP}.new" "$GITHUB_WORKSPACE/$SOURCE_ZIP"
+          unzip -t "$GITHUB_WORKSPACE/$SOURCE_ZIP"
+          ls -lh "$GITHUB_WORKSPACE/$SOURCE_ZIP"
+
       - name: Publicar APK como artefato
         uses: actions/upload-artifact@v4
         with:
@@ -147,13 +202,13 @@ jobs:
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -f "$APK_PATH"
+          git add -f "$APK_PATH" "$SOURCE_ZIP"
 
           if git diff --cached --quiet; then
-            echo 'O APK v0.29.20 já está atualizado na main.'
+            echo 'O APK e o pacote-fonte v0.29.20 já estão atualizados na main.'
             exit 0
           fi
 
-          git commit -m 'build(android): O Mundo CLT Alpha v0.29.20 [skip ci]'
+          git commit -m 'build(android): publicar Alpha v0.29.20 e pacote sincronizado [skip ci]'
           git pull --rebase origin main
           git push origin HEAD:main
