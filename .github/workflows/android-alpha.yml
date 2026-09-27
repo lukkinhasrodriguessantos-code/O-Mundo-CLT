@@ -1,144 +1,155 @@
-name: Build Android Alpha
+name: Build Android Alpha v0.29.20
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
-      - 'O_Mundo_CLT_Godot_v0.29.19.zip'
+      - 'O_Mundo_CLT_Godot_v0.29.20.zip'
       - '.github/workflows/android-alpha.yml'
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: android-alpha-v0.29.20-main
+  cancel-in-progress: true
+
+env:
+  GODOT_VERSION: '4.7.2'
+  SOURCE_ZIP: O_Mundo_CLT_Godot_v0.29.20.zip
+  APK_NAME: O_Mundo_CLT_Alpha_v0.29.20.apk
+  APK_PATH: build/android/O_Mundo_CLT_Alpha_v0.29.20.apk
 
 jobs:
   android-alpha:
-    name: Android Alpha APK
+    name: Validar, gerar APK e atualizar main
     runs-on: ubuntu-latest
 
     container:
       image: barichello/godot-ci:4.7.2
+      options: --user root
 
     steps:
-      - name: Checkout repository
+      - name: Baixar a branch main
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
-      - name: Prepare Godot environment
+      - name: Preparar Godot e Git
         shell: bash
         run: |
           set -euo pipefail
 
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           mkdir -p "$HOME/.local/share/godot/export_templates"
           mkdir -p "$HOME/.config/godot"
 
-          if [ -d /root/.local/share/godot/export_templates/4.7.2.stable ]; then
-            cp -a /root/.local/share/godot/export_templates/4.7.2.stable \
-              "$HOME/.local/share/godot/export_templates/"
+          TEMPLATE_DIR="/root/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          if [ -d "$TEMPLATE_DIR" ]; then
+            cp -a "$TEMPLATE_DIR" "$HOME/.local/share/godot/export_templates/"
           fi
 
           if [ -d /root/.config/godot ]; then
             cp -a /root/.config/godot/. "$HOME/.config/godot/"
           fi
 
-          echo "Versão do Godot:"
           godot --version
-
-          echo "Versão do Java:"
           java -version
 
-      - name: Check source ZIP
+      - name: Conferir ZIP da v0.29.20
         shell: bash
         run: |
           set -euo pipefail
+          test -s "$SOURCE_ZIP"
+          unzip -t "$SOURCE_ZIP"
+          ls -lh "$SOURCE_ZIP"
 
-          if [ ! -f O_Mundo_CLT_Godot_v0.29.19.zip ]; then
-            echo "ERRO: O_Mundo_CLT_Godot_v0.29.19.zip não foi encontrado na raiz do repositório."
-            exit 1
-          fi
-
-          echo "ZIP encontrado:"
-          ls -lh O_Mundo_CLT_Godot_v0.29.19.zip
-
-      - name: Unpack O Mundo CLT source
+      - name: Extrair o projeto
         shell: bash
         run: |
           set -euo pipefail
 
           rm -rf _source
           mkdir -p _source
-
-          unzip -q O_Mundo_CLT_Godot_v0.29.19.zip -d _source
+          unzip -q "$SOURCE_ZIP" -d _source
 
           PROJECT_DIR="$(find _source -type f -name project.godot -printf '%h\n' | head -n 1)"
-
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERRO: project.godot não encontrado dentro do ZIP."
+            echo 'ERRO: project.godot não encontrado dentro do ZIP.'
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Projeto encontrado em: $PROJECT_DIR"
 
-          echo "Projeto encontrado em:"
-          echo "$PROJECT_DIR"
-
-      - name: Import project
+      - name: Validar arquivos, cenas e scripts
         shell: bash
         run: |
           set -euo pipefail
-
           cd "$PROJECT_DIR"
+          chmod +x tools/validate_with_godot.sh tools/build_android_alpha.sh
+          python3 tools/preflight_check.py
+          GODOT_BIN=godot tools/validate_with_godot.sh
 
-          godot \
-            --headless \
-            --editor \
-            --path . \
-            --quit
-
-      - name: Validate project
+      - name: Testar fluxo de abertura
         shell: bash
         run: |
           set -euo pipefail
-
           cd "$PROJECT_DIR"
+          SMOKE_LOG="$(mktemp)"
+          trap 'rm -f "$SMOKE_LOG"' EXIT
 
-          echo "Validando scripts e cenas..."
+          set +e
+          godot --headless --path . --script res://tools/startup_smoke_test.gd 2>&1 | tee "$SMOKE_LOG"
+          STATUS=${PIPESTATUS[0]}
+          set -e
 
-          timeout 30s godot \
-            --headless \
-            --editor \
-            --path . \
-            --quit-after 5
+          if [ "$STATUS" -ne 0 ]; then
+            exit "$STATUS"
+          fi
 
-          echo "Projeto validado com sucesso."
-
-      - name: Build Android debug APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR"
-
-          mkdir -p build/android
-
-          APK="build/android/O_Mundo_CLT_Alpha_v0.29.19.apk"
-
-          godot \
-            --headless \
-            --path . \
-            --export-debug "Android Alpha" \
-            "$APK"
-
-          if [ ! -s "$APK" ]; then
-            echo "ERRO: APK não foi gerado."
+          if grep -Eqi 'SCRIPT ERROR|Parse Error|Compile Error|Failed to load script|Cannot load script' "$SMOKE_LOG"; then
+            echo 'ERRO: o smoke test encontrou falha no fluxo de abertura.'
             exit 1
           fi
 
-          echo "APK gerado com sucesso:"
-          ls -lh "$APK"
+      - name: Gerar O_Mundo_CLT_Alpha_v0.29.20.apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          GODOT_BIN=godot tools/build_android_alpha.sh
+          test -s "build/android/$APK_NAME"
 
-      - name: Upload APK artifact
+          mkdir -p "$GITHUB_WORKSPACE/build/android"
+          cp "build/android/$APK_NAME" "$GITHUB_WORKSPACE/$APK_PATH"
+          ls -lh "$GITHUB_WORKSPACE/$APK_PATH"
+
+      - name: Publicar APK como artefato
         uses: actions/upload-artifact@v4
         with:
-          name: O-Mundo-CLT-v0.29.19-Android-Alpha
-          path: ${{ env.PROJECT_DIR }}/build/android/O_Mundo_CLT_Alpha_v0.29.19.apk
+          name: O-Mundo-CLT-v0.29.20-Android-Alpha
+          path: ${{ env.APK_PATH }}
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
+
+      - name: Fazer commit e push do APK na main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -f "$APK_PATH"
+
+          if git diff --cached --quiet; then
+            echo 'O APK v0.29.20 já está atualizado na main.'
+            exit 0
+          fi
+
+          git commit -m 'build(android): O Mundo CLT Alpha v0.29.20 [skip ci]'
+          git pull --rebase origin main
+          git push origin HEAD:main
