@@ -1,0 +1,138 @@
+name: Build Android Alpha
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'O_Mundo_CLT_Godot_v0.29.17.zip'
+      - '.github/workflows/android-alpha.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  android-alpha:
+    name: Android Alpha APK
+    runs-on: ubuntu-latest
+
+    container:
+      image: barichello/godot-ci:4.7.2
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Godot environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.local/share/godot/export_templates"
+          mkdir -p "$HOME/.config/godot"
+
+          if [ -d /root/.local/share/godot/export_templates/4.7.2.stable ]; then
+            cp -a /root/.local/share/godot/export_templates/4.7.2.stable \
+              "$HOME/.local/share/godot/export_templates/"
+          fi
+
+          if [ -d /root/.config/godot ]; then
+            cp -a /root/.config/godot/. "$HOME/.config/godot/"
+          fi
+
+          echo "Versão do Godot:"
+          godot --version
+
+          echo "Versão do Java:"
+          java -version
+
+      - name: Check source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f O_Mundo_CLT_Godot_v0.29.17.zip
+
+          echo "ZIP encontrado:"
+          ls -lh O_Mundo_CLT_Godot_v0.29.17.zip
+
+      - name: Unpack O Mundo CLT source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf _source
+          mkdir -p _source
+
+          unzip -q O_Mundo_CLT_Godot_v0.29.17.zip -d _source
+
+          PROJECT_DIR="$(find _source -type f -name project.godot -printf '%h\n' | head -n 1)"
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERRO: project.godot não encontrado."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Projeto encontrado em:"
+          echo "$PROJECT_DIR"
+
+      - name: Import project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          godot --headless \
+            --editor \
+            --path . \
+            --quit
+
+      - name: Validate project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "Validando projeto..."
+
+          timeout 20s godot \
+            --headless \
+            --path . \
+            --editor \
+            --quit-after 5
+
+          echo "Validação concluída."
+
+      - name: Build Android debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          mkdir -p build/android
+
+          godot \
+            --headless \
+            --path . \
+            --export-debug "Android Alpha" \
+            "build/android/O_Mundo_CLT_Alpha_v0.29.17.apk"
+
+          if [ ! -s build/android/O_Mundo_CLT_Alpha_v0.29.17.apk ]; then
+            echo "ERRO: APK não foi gerado."
+            exit 1
+          fi
+
+          echo "APK gerado com sucesso:"
+          ls -lh build/android/O_Mundo_CLT_Alpha_v0.29.17.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: O-Mundo-CLT-v0.29.17-Android-Alpha
+          path: ${{ env.PROJECT_DIR }}/build/android/O_Mundo_CLT_Alpha_v0.29.17.apk
+          if-no-files-found: error
+          retention-days: 14
